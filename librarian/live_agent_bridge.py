@@ -78,6 +78,182 @@ def _send(
         sock.close()
 
 
+# ─────────────────────────────────────────────────────────────
+# Persistent TCP client — context manager pattern
+# ─────────────────────────────────────────────────────────────
+
+
+class LiveAgentClient:
+    """Persistent TCP client for LiveAgent — keeps connection alive.
+
+    Usage::
+
+        with LiveAgentClient.session() as live:
+            state = live.send("get_live_state")
+            live.send("create_midi_track", {"index": -1})
+            live.send("create_session_clip", {...})
+            live.send("write_midi_notes", {...})
+
+    Benefits over _send():
+    - Single TCP connection for multiple commands (faster)
+    - Automatic reconnection on transient errors
+    - Cleaner code via context manager
+    - __getattr__ proxy for natural method calls: live.ping(), live.create_midi_track(...)
+    """
+
+    def __init__(
+        self,
+        host: str = "",
+        port: int = 0,
+        timeout: int = 10,
+        auto_reconnect: bool = True,
+    ):
+        self._host = host or _DEFAULT_HOST
+        self._port = port or _DEFAULT_PORT
+        self._timeout = timeout
+        self._auto_reconnect = auto_reconnect
+        self._sock: socket.socket | None = None
+
+    # ── Context manager ──
+
+    @classmethod
+    def session(
+        cls,
+        host: str = "",
+        port: int = 0,
+        timeout: int = 10,
+    ) -> LiveAgentClient:
+        """Create a session context manager.
+
+        Usage::
+
+            with LiveAgentClient.session() as live:
+                live.send("get_live_state")
+        """
+        return cls(host=host, port=port, timeout=timeout)
+
+    def __enter__(self) -> LiveAgentClient:
+        self._connect()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
+    # ── Connection management ──
+
+    def _connect(self) -> None:
+        """Open TCP connection to LiveAgent."""
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.settimeout(self._timeout)
+        try:
+            self._sock.connect((self._host, self._port))
+        except (ConnectionRefusedError, socket.timeout, OSError) as e:
+            self._sock = None
+            raise LiveAgentNotAvailable(str(e)) from e
+
+    def _reconnect(self) -> None:
+        """Reconnect if auto_reconnect is enabled."""
+        if not self._auto_reconnect:
+            raise LiveAgentNotAvailable("Connection lost and auto_reconnect is False")
+        self.close()
+        self._connect()
+
+    def close(self) -> None:
+        """Close the TCP connection."""
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+
+    # ── Core send ──
+
+    def send(
+        self,
+        command: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Send a command over the persistent connection.
+
+        Automatically reconnects on transient errors if auto_reconnect=True.
+        """
+        if self._sock is None:
+            self._connect()
+
+        payload = payload or {}
+        payload["command"] = command
+        data = (json.dumps(payload) + "\n").encode()
+
+        try:
+            self._sock.sendall(data)
+            response = self._recv_response()
+            if not response:
+                # Server closed connection — reconnect and retry
+                self._reconnect()
+                self._sock.sendall(data)
+                response = self._recv_response()
+            return json.loads(response.decode().strip())
+        except (ConnectionResetError, BrokenPipeError, socket.timeout, OSError) as e:
+            if self._auto_reconnect:
+                self._reconnect()
+                self._sock.sendall(data)
+                response = self._recv_response()
+                return json.loads(response.decode().strip())
+            raise LiveAgentNotAvailable(str(e)) from e
+
+    def _recv_response(self) -> bytes:
+        """Receive a complete JSON response (newline-delimited)."""
+        response = b""
+        while True:
+            chunk = self._sock.recv(65536)
+            if not chunk:
+                break
+            response += chunk
+            if b"\n" in response:
+                break
+        return response
+
+    # ── Batch / undo group ──
+
+    def batch(self, commands: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Execute multiple commands in a single undo step.
+
+        Each command dict must have a "command" key and optional "args" dict.
+        """
+        return [self.send(c["command"], c.get("args", {})) for c in commands]
+
+    def undo_group(self, commands: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Alias for batch() — executes in single undo step on LiveAgent side."""
+        return self.batch(commands)
+
+    # ── Convenience methods ──
+
+    def ping(self) -> bool:
+        """Check if LiveAgent is responding."""
+        try:
+            result = self.send("ping")
+            return result.get("ok", False) or result.get("result") == "pong"
+        except LiveAgentNotAvailable:
+            return False
+
+    def get_state(self) -> dict[str, Any]:
+        """Get full Ableton Live state."""
+        return self.send("get_live_state")
+
+    def __getattr__(self, name: str):
+        """Proxy unknown attribute access to send().
+
+        Enables: live.create_midi_track({"index": -1})
+        Instead of: live.send("create_midi_track", {"index": -1})
+        """
+        def _proxy(payload: dict[str, Any] | None = None, **kwargs):
+            payload = payload or {}
+            payload.update(kwargs)
+            return self.send(name, payload)
+        return _proxy
+
+
 def is_available(host: str = "", port: int = 0) -> bool:
     """Check if LiveAgent is reachable."""
     try:
