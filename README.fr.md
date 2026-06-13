@@ -14,37 +14,50 @@
 # Sample Librarian
 
 Recherchez, analysez et recommandez des samples audio depuis votre bibliothèque locale.
-Fonctionne de manière autonome ou s'intègre avec [live-agent-remote](https://github.com/happytown-s/live-agent-remote) pour la prévisualisation dans Ableton Live.
+SQLite + FTS5 pour la recherche plein texte, enrichissement des résultats adapté aux
+agents IA, détection des doublons et correspondance harmonique selon le Cercle Camelot.
+Fonctionne de manière autonome ou s'intègre avec [live-agent-remote](https://github.com/happytown-s/live-agent-remote)
+pour la prévisualisation dans Ableton Live et la création de Drum Racks one-shot.
 
 ## Fonctionnalités
 
 - **Gestion des racines** — Ajoutez des dossiers de samples à la configuration avec ré-indexation automatique
-- **Indexation** — Analysez n'importe quel dossier de samples, extrayez les métadonnées (catégorie, tags, informations sur les fichiers)
-- **Recherche** — Recherche par mots-clés avec score (nom > catégorie > tags > contenu)
-- **Analyse** — Détection de hauteur (pitch), BPM et estimation de tonalité basés sur librosa
+- **Indexation** — Analysez les dossiers, extrayez les métadonnées, stockez dans SQLite avec FTS5
+- **Recherche** — Recherche plein texte BM25 sur le nom, la catégorie, les tags et les chemins de dossiers
+- **Résultats enrichis** — Chaque résultat de recherche inclut `key`, `bpm`, `pitch`, `confidence`, `recommended_use` et `ableton_action` — prêts à être exploités par des agents IA
+- **Analyse** — Détection de hauteur (pitch), BPM, estimation de tonalité et analyse spectrale basées sur librosa
+- **Détection de doublons** — Trouvez les doublons selon 4 axes : hachage de contenu, durée, hauteur et empreinte spectrale
 - **Recommandation** — Correspondance harmonique selon le Cercle Camelot pour des samples compatibles en tonalité
-- **Intégration Ableton** *(optionnel)* — Prévisualisez les samples dans Live, chargez-les sur les pads du Drum Rack
+- **Drum Rack one-shot** — `build_drum_rack_for_key()` recherche les samples compatibles, crée une piste Drum Rack, charge les kicks/snares/hi-hats sur les pads et écrit un pattern MIDI — le tout en un seul appel
+- **Intégration Ableton** *(optionnel)* — Prévisualisez les samples dans Live, chargez-les sur les pads du Drum Rack, avec gestion de session TCP et groupes d'annulation
 
 ## Architecture
 
 ```
-                    ┌──────────────────────────┐
-  AI Agent          │   sample-librarian       │
-    │               │   MCP Server (9 tools)   │
-    ├── librarian_search        ──┐            │
-    ├── librarian_add_root        │ Core (standalone)
-    ├── librarian_list_roots      │            │
-    ├── librarian_analyze         │            │
-    ├── librarian_recommend       │            │
-    ├── librarian_preview ────────┤            │
-    └── librarian_load_to_pad     │ Optional   │
-                                 ──┘           │
-                    └──────────┬───────────────┘
-                               │ TCP (optional)
-                    ┌──────────▼───────────────┐
-                    │   live-agent-remote      │
-                    │   (Ableton Live)         │
-                    └──────────────────────────┘
+                    ┌──────────────────────────────────┐
+  AI Agent          │   sample-librarian               │
+    │               │   MCP Server (9 tools)           │
+    │               │                                  │
+    ├── librarian_search ──────────┐                   │
+    ├── librarian_add_root          │ Core (standalone) │
+    ├── librarian_list_roots        │                   │
+    ├── librarian_index             ▼                   │
+    ├── librarian_analyze      ┌─────────────┐          │
+    ├── librarian_analyze_folder│  SQLite +   │          │
+    ├── librarian_recommend     │  FTS5 (BM25)│          │
+    │                           └─────────────┘          │
+    ├── librarian_preview ──────┐                       │
+    └── librarian_load_to_pad   │ Optional              │
+                                │                       │
+              build_drum_rack_for_key()                 │
+              (Python API, not MCP tool)                │
+                                │                       │
+                    ┌──────────▼───────────────────────┐
+                    │   live-agent-remote              │
+                    │   LiveAgentClient (TCP 8765)     │
+                    │   batch() / undo_group()         │
+                    │   (Ableton Live)                 │
+                    └──────────────────────────────────┘
 ```
 
 **Les outils principaux fonctionnent sans Ableton.** Les outils d'intégration détectent
@@ -72,6 +85,70 @@ bash setup.sh
 .venv/bin/python3 -m librarian.recommend Fm kick --analyze
 ```
 
+## Base de données
+
+Sample Librarian utilise **SQLite avec FTS5** (recherche plein texte BM25) comme
+index principal. Lors de la première exécution, les index JSONL existants sont
+automatiquement migrés vers SQLite.
+
+**Points clés du schéma :**
+- `samples` — métadonnées des fichiers (chemin, nom, catégorie, taille, hachage)
+- `analysis_cache` — hauteur, BPM, tonalité, durée, données spectrales
+- `tags` — associations de tags consultables
+- `roots` — dossiers de samples enregistrés avec historique d'analyse
+- `samples_fts` — table virtuelle FTS5 pour la recherche BM25
+
+**Enrichissement adapté aux IA** (`enrich_result()`) : chaque résultat de recherche est
+enrichi avec :
+
+| Champ | Description |
+|-------|-------------|
+| `key` | Tonalalité musicale détectée |
+| `bpm` | Tempo détecté |
+| `pitch` | Hauteur fondamentale (nom de la note + numéro) |
+| `sample_type` | oneshot / short_loop / medium_loop / long_loop |
+| `is_atonal` | Vrai pour les samples non harmoniques (hi-hats, bruit) |
+| `confidence` | Score heuristique 0.0–1.0 basé sur la complétude de l'analyse |
+| `recommended_use` | Comment utiliser ce sample (ex. « drum_kit_kick ») |
+| `ableton_action` | Appel LiveAgent suggéré (ex. `load_sample_to_pad`) |
+| `compatible_keys` | Tonalités compatibles harmoniquement selon le Cercle Camelot |
+
+## Détection de doublons
+
+Trouvez les samples redondants selon quatre axes indépendants :
+
+| Fonction | Méthode | Cas d'usage |
+|----------|---------|-------------|
+| `find_duplicates_by_hash()` | Hachage de contenu (fichiers identiques) | Doublons exacts |
+| `find_similar_by_duration()` | Durée dans une tolérance + même catégorie | Ré-exportations potentielles |
+| `find_similar_by_pitch()` | Même classe de hauteur + même catégorie | Chevauchement tonal |
+| `find_similar_by_spectral()` | Similarité du centroïde spectral | Même caractère/timbre |
+| `find_all_duplicates()` | Toutes les méthodes ci-dessus combinées | Audit complet |
+
+## Drum Rack one-shot (`build_drum_rack_for_key()`)
+
+L'API d'orchestration qui relie tout :
+
+```python
+from librarian.live_agent_bridge import build_drum_rack_for_key
+
+result = build_drum_rack_for_key(
+    key="Fm",                    # tonalité cible
+    track_index=-1,              # ajouter à la fin de la liste des pistes
+    host="127.0.0.1",            # hôte LiveAgent
+    port=8765,                   # port LiveAgent
+)
+```
+
+Ce seul appel :
+1. Recherche dans l'index SQLite des samples de kick, snare et hi-hat compatibles avec la tonalité
+2. Crée une piste Drum Rack dans Ableton Live (par défaut : 808 Core Kit)
+3. Charge les samples sur les pads 36 (kick), 38 (snare), 42 (closed hat)
+4. Écrit optionnellement un pattern de batterie MIDI basique
+5. Renvoie les chemins des samples chargés pour vérification
+
+Voir `docs/recipes.md` pour une utilisation détaillée.
+
 ## Serveur MCP (pour agents IA)
 
 ### Hermes Agent
@@ -93,26 +170,24 @@ Command: /path/to/sample-librarian/.venv/bin/python3
 Args: [/path/to/sample-librarian/mcp_server.py]
 ```
 
+Voir `docs/mcp-clients.md` pour Claude Desktop, Cursor et autres clients.
+
 ## Outils MCP (9 au total)
 
 ### Noyau (toujours disponible)
 
-| Outil | Description |
-|-------|-------------|
-| `librarian_search` | Rechercher dans l'index par mots-clés, catégorie, extension |
-| `librarian_add_root` | Ajouter un dossier à la configuration + ré-indexation automatique |
-| `librarian_list_roots` | Afficher les racines configurées et le statut de l'index |
-| `librarian_index` | Construire/reconstruire l'index des samples depuis les dossiers |
-| `librarian_analyze` | Analyser un fichier : hauteur (pitch), BPM, tonalité, durée |
-| `librarian_analyze_folder` | Analyser un dossier en lot (trié par hauteur) |
-| `librarian_recommend` | Recommandations de compatibilité harmonique selon le Cercle Camelot |
+- `librarian_search` — Rechercher dans l'index par mots-clés, catégorie, extension
+- `librarian_add_root` — Ajouter un dossier à la configuration + ré-indexation automatique
+- `librarian_list_roots` — Afficher les racines configurées et le statut de l'index
+- `librarian_index` — Construire/reconstruire l'index des samples depuis les dossiers
+- `librarian_analyze` — Analyser un fichier : hauteur (pitch), BPM, tonalité, durée
+- `librarian_analyze_folder` — Analyser un dossier en lot (trié par hauteur)
+- `librarian_recommend` — Recommandations de compatibilité harmonique selon le Cercle Camelot
 
 ### Intégration optionnelle (nécessite live-agent-remote)
 
-| Outil | Description |
-|-------|-------------|
-| `librarian_preview` | Importer un sample comme clip audio dans Ableton Live |
-| `librarian_load_to_pad` | Charger un sample sur un pad du Drum Rack |
+- `librarian_preview` — Importer un sample comme clip audio dans Ableton Live
+- `librarian_load_to_pad` — Charger un sample sur un pad du Drum Rack
 
 Les outils d'intégration détectent automatiquement si LiveAgent est en cours d'exécution.
 Si ce n'est pas disponible, ils renvoient une erreur utile avec des instructions
@@ -122,10 +197,8 @@ d'installation — les outils principaux restent entièrement fonctionnels.
 
 Ces deux projets sont **indépendants mais complémentaires** :
 
-| Projet | Rôle |
-|--------|------|
-| **sample-librarian** | Rechercher, analyser et recommander des samples |
-| **live-agent-remote** | Contrôler Ableton Live (MIDI, clips, appareils) |
+- **sample-librarian** — Rechercher, analyser et recommander des samples
+- **live-agent-remote** — Contrôler Ableton Live (MIDI, clips, appareils)
 
 Enregistrez les deux serveurs MCP dans la configuration de votre agent IA :
 
@@ -142,11 +215,14 @@ mcp_servers:
 ### Flux de travail type
 
 ```
-0. librarian_add_root("~/Music/Ableton/User Library/Samples")  → enregistrer le dossier + indexation auto
-1. librarian_recommend("Fm", category="Kick")     → obtenir les kicks compatibles
+0. librarian_add_root("~/Music/Ableton/User Library/Samples")  → enregistrer + indexer
+1. librarian_recommend("Fm", category="Kick")     → kicks compatibles
 2. librarian_preview("/path/to/kick.wav")          → prévisualiser dans Ableton
 3. librarian_load_to_pad("/path/to/kick.wav", ...) → charger sur le Drum Rack
 4. mcp_liveagent_write_midi_notes(...)              → écrire un pattern de batterie
+
+# Ou faites 1-4 en une seule fois :
+build_drum_rack_for_key(key="Fm")  → recherche + création + chargement + MIDI
 ```
 
 ## Configuration
@@ -177,15 +253,9 @@ export LIVEAGENT_PORT=8765
 
 Les recommandations utilisent le système du Cercle Camelot :
 
-| Tonalité | Camelot | Compatible avec |
-|----------|---------|-----------------|
-| Fm       | 4B      | Ebm(3B), C#m(5B), F(4A) |
-| C        | 8A      | F(7A), G(9A), Am(8B) |
-
-**Règles :**
-- Même numéro, même lettre (correspondance parfaite)
-- Numéro adjacent ±1, même lettre (transition fluide)
-- Même numéro, lettre opposée (relative majeure/mineure)
+- Même numéro, même lettre — correspondance parfaite
+- Numéro adjacent ±1, même lettre — transition fluide
+- Même numéro, lettre opposée — relative majeure/mineure
 - Les samples atonaux (hi-hats, bruit) sont toujours inclus
 
 ## Utilisation en ligne de commande
@@ -206,7 +276,28 @@ python3 -m librarian.analyze ./folder/ --mode pitch
 # Recommandation
 python3 -m librarian.recommend Fm kick --analyze
 python3 -m librarian.recommend C --category Bass
+
+# Base de données (détection de doublons, migration)
+python3 -m librarian.db --duplicates
+python3 -m librarian.db --migrate data/samples_index.jsonl
+python3 -m librarian.db --stats
 ```
+
+## Documentation
+
+- `docs/recipes.md` — Flux de travail courants et exemples de code
+- `docs/security.md` — Modèle de sécurité et opérations sûres
+- `docs/troubleshooting.md` — Guide de débogage
+- `docs/mcp-clients.md` — Configuration pour Claude Desktop, Cursor et autres
+
+## Tests
+
+```bash
+.venv/bin/python3 -m pytest tests/ -v
+```
+
+22 tests couvrant les opérations de base de données, la recherche, l'analyse et l'enrichissement.
+L'intégration continue (CI) s'exécute sur GitHub Actions avec ruff lint + pytest.
 
 ## Prérequis
 
