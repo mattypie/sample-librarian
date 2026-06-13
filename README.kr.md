@@ -13,19 +13,19 @@
 
 # Sample Librarian
 
-Search, analyze, and recommend audio samples from your local library.
-Works standalone, or integrates with [live-agent-remote](https://github.com/happytown-s/live-agent-remote) for Ableton Live preview.
+로컬 라이브러리에서 오디오 샘플을 검색, 분석 및 추천합니다.
+단독으로 작동하거나 [live-agent-remote](https://github.com/happytown-s/live-agent-remote)와 연동하여 Ableton Live에서 미리듣기를 지원합니다.
 
-## Features
+## 주요 기능
 
-- **Manage Roots** — Add sample folders to config with auto re-index
-- **Index** — Scan any sample folder, extract metadata (category, tags, file info)
-- **Search** — Keyword search with scoring (name > category > tags > content)
-- **Analyze** — librosa-based pitch detection, BPM, key estimation
-- **Recommend** — Camelot Wheel harmonic matching for key-compatible samples
-- **Ableton Integration** *(optional)* — Preview samples in Live, load onto Drum Rack pads
+- **루트 관리** — 샘플 폴더를 config에 추가하면 자동으로 재인덱싱
+- **인덱싱** — 샘플 폴더를 스캔하여 메타데이터(카테고리, 태그, 파일 정보) 추출
+- **검색** — 점수 기반 키워드 검색 (이름 > 카테고리 > 태그 > 콘텐츠)
+- **분석** — librosa 기반 피치 감지, BPM, 키 추정
+- **추천** — Camelot Wheel 화성 매칭으로 키 호환 샘플 추천
+- **Ableton 연동** *(선택)* — Live에서 샘플 미리듣기, Drum Rack 패드에 로드
 
-## Architecture
+## 아키텍처
 
 ```
                     ┌──────────────────────────┐
@@ -47,10 +47,10 @@ Works standalone, or integrates with [live-agent-remote](https://github.com/happ
                     └──────────────────────────┘
 ```
 
-**Core tools work without Ableton.** Integration tools gracefully detect
-whether LiveAgent is running and provide helpful setup messages if not.
+**핵심 도구는 Ableton 없이도 작동합니다.** 연동 도구는 LiveAgent 실행 여부를 자동으로 감지하며,
+실행 중이 아닌 경우 도움말 설정 메시지를 제공합니다.
 
-## Quick Start
+## 빠른 시작
 
 ```bash
 # Setup
@@ -71,11 +71,11 @@ bash setup.sh
 .venv/bin/python3 -m librarian.recommend Fm kick --analyze
 ```
 
-## MCP Server (for AI Agents)
+## MCP Server (AI 에이전트용)
 
 ### Hermes Agent
 
-Add to `~/.hermes/profiles/<profile>/config.yaml`:
+`~/.hermes/profiles/<profile>/config.yaml`에 추가:
 
 ```yaml
 mcp_servers:
@@ -84,49 +84,49 @@ mcp_servers:
     args: [/path/to/sample-librarian/mcp_server.py]
 ```
 
-### Other MCP Clients
+### 기타 MCP 클라이언트
 
-Point your MCP client to:
+MCP 클라이언트에 다음을 지정:
 ```
 Command: /path/to/sample-librarian/.venv/bin/python3
 Args: [/path/to/sample-librarian/mcp_server.py]
 ```
 
-## MCP Tools (9 total)
+## MCP Tools (총 9개)
 
-### Core (always available)
+### 핵심 (항상 사용 가능)
 
-| Tool | Description |
+| Tool | 설명 |
 |------|-------------|
-| `librarian_search` | Search index by keywords, category, extension |
-| `librarian_add_root` | Add folder to config + auto re-index |
-| `librarian_list_roots` | Show configured roots and index status |
-| `librarian_index` | Build/rebuild sample index from folders |
-| `librarian_analyze` | Analyze file: pitch, BPM, key, duration |
-| `librarian_analyze_folder` | Batch analyze folder (sorted by pitch) |
-| `librarian_recommend` | Camelot Wheel key-compatible recommendations |
+| `librarian_search` | 키워드, 카테고리, 확장자로 인덱스 검색 |
+| `librarian_add_root` | 폴더를 config에 추가 + 자동 재인덱싱 |
+| `librarian_list_roots` | 설정된 루트 및 인덱스 상태 표시 |
+| `librarian_index` | 폴더에서 샘플 인덱스 구축/재구축 |
+| `librarian_analyze` | 파일 분석: 피치, BPM, 키, 길이 |
+| `librarian_analyze_folder` | 폴더 일괄 분석 (피치순 정렬) |
+| `librarian_recommend` | Camelot Wheel 키 호환 추천 |
 
-### Optional Integration (requires live-agent-remote)
+### 선택 연동 (live-agent-remote 필요)
 
-| Tool | Description |
+| Tool | 설명 |
 |------|-------------|
-| `librarian_preview` | Import sample as audio clip in Ableton Live |
-| `librarian_load_to_pad` | Load sample onto Drum Rack pad |
+| `librarian_preview` | Ableton Live에서 샘플을 오디오 클립으로 임포트 |
+| `librarian_load_to_pad` | Drum Rack 패드에 샘플 로드 |
 
-Integration tools auto-detect if LiveAgent is running. If not available,
-they return a helpful error with setup instructions — the core tools
-remain fully functional.
+연동 도구는 LiveAgent 실행 여부를 자동 감지합니다. 사용할 수 없는 경우
+설정 가이드가 포함된 유용한 에러를 반환하며, 핵심 도구는
+완전히 작동합니다.
 
-## Using with live-agent-remote
+## live-agent-remote와 함께 사용하기
 
-These two projects are **independent but complementary**:
+이 두 프로젝트는 **독립적이지만 상호 보완적**입니다:
 
-| Project | Role |
+| Project | 역할 |
 |---------|------|
-| **sample-librarian** | Search, analyze, recommend samples |
-| **live-agent-remote** | Control Ableton Live (MIDI, clips, devices) |
+| **sample-librarian** | 샘플 검색, 분석, 추천 |
+| **live-agent-remote** | Ableton Live 제어 (MIDI, 클립, 디바이스) |
 
-Register both MCP servers in your AI agent config:
+AI 에이전트 config에 두 MCP 서버를 모두 등록:
 
 ```yaml
 mcp_servers:
@@ -138,7 +138,7 @@ mcp_servers:
     args: [/path/to/sample-librarian/mcp_server.py]
 ```
 
-### Typical Workflow
+### 일반적인 워크플로우
 
 ```
 0. librarian_add_root("~/Music/Ableton/User Library/Samples")  → register folder + auto index
@@ -148,9 +148,9 @@ mcp_servers:
 4. mcp_liveagent_write_midi_notes(...)              → write drum pattern
 ```
 
-## Configuration
+## 설정
 
-Edit `config.local.py` (gitignored):
+`config.local.py`를 편집 (gitignored):
 
 ```python
 # Required: sample folders to index
@@ -164,7 +164,7 @@ LIVEAGENT_HOST = "127.0.0.1"
 LIVEAGENT_PORT = 8765
 ```
 
-Or use environment variables:
+또는 환경 변수 사용:
 
 ```bash
 export SAMPLES_PATH="/path/to/samples"
@@ -172,22 +172,22 @@ export LIVEAGENT_HOST=127.0.0.1
 export LIVEAGENT_PORT=8765
 ```
 
-## Camelot Wheel Harmonic Matching
+## Camelot Wheel 화성 매칭
 
-Recommendations use the Camelot Wheel system:
+추천은 Camelot Wheel 시스템을 사용합니다:
 
-| Key | Camelot | Compatible With |
+| Key | Camelot | 호환 키 |
 |-----|---------|-----------------|
 | Fm  | 4B      | Ebm(3B), C#m(5B), F(4A) |
 | C   | 8A      | F(7A), G(9A), Am(8B) |
 
-**Rules:**
-- Same number, same letter (perfect match)
-- Adjacent number ±1, same letter (smooth transition)
-- Same number, opposite letter (relative major/minor)
-- Atonal samples (hi-hats, noise) always included
+**규칙:**
+- 같은 번호, 같은 문자 (완벽한 매치)
+- 인접 번호 ±1, 같은 문자 (자연스러운 전환)
+- 같은 번호, 반대 문자 (나란한 장/단조)
+- 무조성 샘플 (하이햇, 노이즈)은 항상 포함
 
-## CLI Usage
+## CLI 사용법
 
 ```bash
 # Index
@@ -207,12 +207,12 @@ python3 -m librarian.recommend Fm kick --analyze
 python3 -m librarian.recommend C --category Bass
 ```
 
-## Requirements
+## 요구사항
 
 - Python 3.10+
-- librosa, numpy, scipy, soundfile (auto-installed by setup.sh)
-- mcp (for MCP server)
-- Optional: [live-agent-remote](https://github.com/happytown-s/live-agent-remote) for Ableton integration
+- librosa, numpy, scipy, soundfile (setup.sh로 자동 설치)
+- mcp (MCP server용)
+- 선택: [live-agent-remote](https://github.com/happytown-s/live-agent-remote) (Ableton 연동용)
 
 ## License
 

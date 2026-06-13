@@ -13,19 +13,19 @@
 
 # Sample Librarian
 
-Search, analyze, and recommend audio samples from your local library.
-Works standalone, or integrates with [live-agent-remote](https://github.com/happytown-s/live-agent-remote) for Ableton Live preview.
+Busca, analiza y recomienda samples de audio desde tu biblioteca local.
+Funciona de forma independiente, o se integra con [live-agent-remote](https://github.com/happytown-s/live-agent-remote) para previsualización en Ableton Live.
 
-## Features
+## Características
 
-- **Manage Roots** — Add sample folders to config with auto re-index
-- **Index** — Scan any sample folder, extract metadata (category, tags, file info)
-- **Search** — Keyword search with scoring (name > category > tags > content)
-- **Analyze** — librosa-based pitch detection, BPM, key estimation
-- **Recommend** — Camelot Wheel harmonic matching for key-compatible samples
-- **Ableton Integration** *(optional)* — Preview samples in Live, load onto Drum Rack pads
+- **Gestión de raíces** — Añade carpetas de samples a la configuración con reindexado automático
+- **Indexado** — Escanea cualquier carpeta de samples, extrae metadatos (categoría, etiquetas, información de archivo)
+- **Búsqueda** — Búsqueda por palabras clave con puntuación (nombre > categoría > etiquetas > contenido)
+- **Análisis** — Detección de tono basada en librosa, BPM, estimación de tonalidad
+- **Recomendación** — Coincidencia armónica Camelot Wheel para samples compatibles por tonalidad
+- **Integración con Ableton** *(opcional)* — Previsualiza samples en Live, cárgalos en pads de Drum Rack
 
-## Architecture
+## Arquitectura
 
 ```
                     ┌──────────────────────────┐
@@ -47,10 +47,11 @@ Works standalone, or integrates with [live-agent-remote](https://github.com/happ
                     └──────────────────────────┘
 ```
 
-**Core tools work without Ableton.** Integration tools gracefully detect
-whether LiveAgent is running and provide helpful setup messages if not.
+**Las herramientas principales funcionan sin Ableton.** Las herramientas de integración
+detectan automáticamente si LiveAgent está en ejecución y muestran mensajes útiles
+de configuración si no lo está.
 
-## Quick Start
+## Inicio rápido
 
 ```bash
 # Setup
@@ -71,11 +72,11 @@ bash setup.sh
 .venv/bin/python3 -m librarian.recommend Fm kick --analyze
 ```
 
-## MCP Server (for AI Agents)
+## Servidor MCP (para agentes de IA)
 
 ### Hermes Agent
 
-Add to `~/.hermes/profiles/<profile>/config.yaml`:
+Añade a `~/.hermes/profiles/<profile>/config.yaml`:
 
 ```yaml
 mcp_servers:
@@ -84,49 +85,49 @@ mcp_servers:
     args: [/path/to/sample-librarian/mcp_server.py]
 ```
 
-### Other MCP Clients
+### Otros clientes MCP
 
-Point your MCP client to:
+Apunta tu cliente MCP a:
 ```
 Command: /path/to/sample-librarian/.venv/bin/python3
 Args: [/path/to/sample-librarian/mcp_server.py]
 ```
 
-## MCP Tools (9 total)
+## Herramientas MCP (9 en total)
 
-### Core (always available)
+### Principales (siempre disponibles)
 
-| Tool | Description |
+| Herramienta | Descripción |
 |------|-------------|
-| `librarian_search` | Search index by keywords, category, extension |
-| `librarian_add_root` | Add folder to config + auto re-index |
-| `librarian_list_roots` | Show configured roots and index status |
-| `librarian_index` | Build/rebuild sample index from folders |
-| `librarian_analyze` | Analyze file: pitch, BPM, key, duration |
-| `librarian_analyze_folder` | Batch analyze folder (sorted by pitch) |
-| `librarian_recommend` | Camelot Wheel key-compatible recommendations |
+| `librarian_search` | Busca en el índice por palabras clave, categoría, extensión |
+| `librarian_add_root` | Añade carpeta a la configuración + reindexado automático |
+| `librarian_list_roots` | Muestra las raíces configuradas y el estado del índice |
+| `librarian_index` | Construye/reconstruye el índice de samples desde las carpetas |
+| `librarian_analyze` | Analiza archivo: tono, BPM, tonalidad, duración |
+| `librarian_analyze_folder` | Análisis por lotes de carpeta (ordenado por tono) |
+| `librarian_recommend` | Recomendaciones compatibles por tonalidad Camelot Wheel |
 
-### Optional Integration (requires live-agent-remote)
+### Integración opcional (requiere live-agent-remote)
 
-| Tool | Description |
+| Herramienta | Descripción |
 |------|-------------|
-| `librarian_preview` | Import sample as audio clip in Ableton Live |
-| `librarian_load_to_pad` | Load sample onto Drum Rack pad |
+| `librarian_preview` | Importa sample como clip de audio en Ableton Live |
+| `librarian_load_to_pad` | Carga sample en un pad de Drum Rack |
 
-Integration tools auto-detect if LiveAgent is running. If not available,
-they return a helpful error with setup instructions — the core tools
-remain fully functional.
+Las herramientas de integración detectan automáticamente si LiveAgent está en ejecución.
+Si no está disponible, devuelven un error útil con instrucciones de configuración — las
+herramientas principales siguen funcionando completamente.
 
-## Using with live-agent-remote
+## Uso con live-agent-remote
 
-These two projects are **independent but complementary**:
+Estos dos proyectos son **independientes pero complementarios**:
 
-| Project | Role |
+| Proyecto | Rol |
 |---------|------|
-| **sample-librarian** | Search, analyze, recommend samples |
-| **live-agent-remote** | Control Ableton Live (MIDI, clips, devices) |
+| **sample-librarian** | Buscar, analizar, recomendar samples |
+| **live-agent-remote** | Controlar Ableton Live (MIDI, clips, dispositivos) |
 
-Register both MCP servers in your AI agent config:
+Registra ambos servidores MCP en la configuración de tu agente de IA:
 
 ```yaml
 mcp_servers:
@@ -138,7 +139,7 @@ mcp_servers:
     args: [/path/to/sample-librarian/mcp_server.py]
 ```
 
-### Typical Workflow
+### Flujo de trabajo típico
 
 ```
 0. librarian_add_root("~/Music/Ableton/User Library/Samples")  → register folder + auto index
@@ -148,9 +149,9 @@ mcp_servers:
 4. mcp_liveagent_write_midi_notes(...)              → write drum pattern
 ```
 
-## Configuration
+## Configuración
 
-Edit `config.local.py` (gitignored):
+Edita `config.local.py` (gitignored):
 
 ```python
 # Required: sample folders to index
@@ -164,7 +165,7 @@ LIVEAGENT_HOST = "127.0.0.1"
 LIVEAGENT_PORT = 8765
 ```
 
-Or use environment variables:
+O usa variables de entorno:
 
 ```bash
 export SAMPLES_PATH="/path/to/samples"
@@ -172,22 +173,22 @@ export LIVEAGENT_HOST=127.0.0.1
 export LIVEAGENT_PORT=8765
 ```
 
-## Camelot Wheel Harmonic Matching
+## Coincidencia armónica Camelot Wheel
 
-Recommendations use the Camelot Wheel system:
+Las recomendaciones utilizan el sistema Camelot Wheel:
 
-| Key | Camelot | Compatible With |
+| Tonalidad | Camelot | Compatible con |
 |-----|---------|-----------------|
 | Fm  | 4B      | Ebm(3B), C#m(5B), F(4A) |
 | C   | 8A      | F(7A), G(9A), Am(8B) |
 
-**Rules:**
-- Same number, same letter (perfect match)
-- Adjacent number ±1, same letter (smooth transition)
-- Same number, opposite letter (relative major/minor)
-- Atonal samples (hi-hats, noise) always included
+**Reglas:**
+- Mismo número, misma letra (coincidencia perfecta)
+- Número adyacente ±1, misma letra (transición suave)
+- Mismo número, letra opuesta (relativo mayor/menor)
+- Los samples atonales (hi-hats, ruido) siempre se incluyen
 
-## CLI Usage
+## Uso de CLI
 
 ```bash
 # Index
@@ -207,13 +208,13 @@ python3 -m librarian.recommend Fm kick --analyze
 python3 -m librarian.recommend C --category Bass
 ```
 
-## Requirements
+## Requisitos
 
 - Python 3.10+
-- librosa, numpy, scipy, soundfile (auto-installed by setup.sh)
-- mcp (for MCP server)
-- Optional: [live-agent-remote](https://github.com/happytown-s/live-agent-remote) for Ableton integration
+- librosa, numpy, scipy, soundfile (instalados automáticamente por setup.sh)
+- mcp (para el servidor MCP)
+- Opcional: [live-agent-remote](https://github.com/happytown-s/live-agent-remote) para la integración con Ableton
 
-## License
+## Licencia
 
 MIT
