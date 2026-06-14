@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Batch scan + analyze Battery 4 + Maschine 2 Factory directly into SQLite."""
 
-import sys
-import os
-import time
 import hashlib
+import os
+import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from librarian.db import init_db, get_db, upsert_sample, upsert_analysis
 from librarian.analyze import analyze_file
+from librarian.db import get_db, init_db, upsert_analysis, upsert_sample
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "samples.db")
 
@@ -27,7 +27,7 @@ def collect_files():
             print(f"WARNING: {lib} not found, skipping", flush=True)
             continue
         count = 0
-        for root, dirs, fnames in os.walk(lib):
+        for root, _dirs, fnames in os.walk(lib):
             for f in fnames:
                 ext = os.path.splitext(f)[1].lower()
                 if ext in EXTENSIONS:
@@ -144,7 +144,7 @@ def run():
                 else:
                     skipped += 1
 
-            except Exception as e:
+            except Exception:
                 errors += 1
 
         # Progress every 100 files
