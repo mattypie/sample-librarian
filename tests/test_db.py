@@ -137,6 +137,24 @@ def test_fts5_search_multiword(db_conn, sample_factory):
     assert not any("Snare" in n for n in names)
 
 
+def test_fts5_search_or_fallback(db_conn, sample_factory):
+    """AND検索で0件の時、OR検索にフォールバックして結果を返す。"""
+    sample_factory(
+        db_conn, name="808 Kick", category="Kick",
+        path="/s/or1.wav", tags=["punchy"],
+    )
+    sample_factory(
+        db_conn, name="Punchy Snare", category="Snare",
+        path="/s/or2.wav",
+    )
+
+    # "808 snare" — 両方の単語を含むサンプルはないが、
+    # ORフォールバックで各サンプルが1語ずつマッチするはず（両方返る）
+    results = search_samples(db_conn, "808 snare")
+    names = [r["name"] for r in results]
+    assert "808 Kick" in names and "Punchy Snare" in names
+
+
 # ---------------------------------------------------------------------------
 # Category filter
 # ---------------------------------------------------------------------------
