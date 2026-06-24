@@ -413,3 +413,92 @@ def test_migrate_from_jsonl_missing_file(db_conn, tmp_path: Path):
     """migrate_from_jsonl returns 0 for a non-existent file."""
     count = migrate_from_jsonl(db_conn, str(tmp_path / "nonexistent.jsonl"))
     assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# scan_root_to_db
+# ---------------------------------------------------------------------------
+
+def test_scan_root_to_db(tmp_path: Path):
+    """scan_root_to_db scans a folder and upserts samples into the DB."""
+    from librarian.db import get_db, get_stats, init_db, scan_root_to_db, search_samples
+
+    # Create a fake sample folder
+    root = tmp_path / "samples"
+    root.mkdir()
+    (root / "Kick").mkdir()
+    (root / "Kick" / "808 Boom.wav").write_bytes(b"\x00" * 1024)
+    (root / "Kick" / "Punchy Kick.wav").write_bytes(b"\x00" * 2048)
+    (root / "Snare").mkdir()
+    (root / "Snare" / "Clap.wav").write_bytes(b"\x00" * 512)
+
+    db_path = str(tmp_path / "scan_test.db")
+    init_db(db_path)
+    conn = get_db(db_path)
+    try:
+        result = scan_root_to_db(conn, root)
+
+        # All 3 audio files found
+        assert result["files_found"] == 3
+        assert result["files_new"] == 3
+        assert result["root"] == str(root)
+
+        # Samples are in the DB and searchable
+        stats = get_stats(conn)
+        assert stats["total_samples"] == 3
+
+        hits = search_samples(conn, "boom")
+        assert len(hits) == 1
+        assert "808 Boom" in hits[0]["name"]
+
+        # Re-scan: all updates (no new)
+        result2 = scan_root_to_db(conn, root)
+        assert result2["files_found"] == 3
+        assert result2["files_new"] == 0
+        assert result2["files_updated"] == 3
+    finally:
+        conn.close()
+
+
+def test_scan_root_to_db_missing_root(tmp_path: Path):
+    """scan_root_to_db returns zeros for a non-existent root."""
+    from librarian.db import get_db, init_db, scan_root_to_db
+
+    db_path = str(tmp_path / "missing_test.db")
+    init_db(db_path)
+    conn = get_db(db_path)
+    try:
+        result = scan_root_to_db(conn, tmp_path / "does_not_exist")
+        assert result["files_found"] == 0
+        assert result["files_new"] == 0
+        assert result["files_updated"] == 0
+    finally:
+        conn.close()
+
+
+def test_scan_root_to_db_empty_folder(tmp_path: Path):
+    """scan_root_to_db on an empty folder finds nothing but still records a scan."""
+    from librarian.db import get_db, get_stats, init_db, scan_root_to_db
+
+    root = tmp_path / "empty"
+    root.mkdir()
+
+    db_path = str(tmp_path / "empty_test.db")
+    init_db(db_path)
+    conn = get_db(db_path)
+    try:
+        result = scan_root_to_db(conn, root)
+        assert result["files_found"] == 0
+
+        stats = get_stats(conn)
+        assert stats["total_samples"] == 0
+
+        # scan_history should still record the (empty) scan
+        history = conn.execute(
+            "SELECT files_found, status FROM scan_history WHERE root_path = ?",
+            (str(root),),
+        ).fetchone()
+        assert history is not None
+        assert history["files_found"] == 0
+    finally:
+        conn.close()

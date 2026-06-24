@@ -659,6 +659,81 @@ def update_root(conn: sqlite3.Connection, root_path: str, file_count: int) -> No
     conn.commit()
 
 
+def compute_file_hash(path: str) -> str | None:
+    """Quick hash of file path + size for dedup.
+
+    Shared by :func:`scan_root_to_db` and ``batch_analyze_sqlite.py`` so the
+    dedup scheme stays consistent across ingestion paths.
+    """
+    import hashlib
+
+    try:
+        st = os.stat(path)
+        return hashlib.md5(f"{path}:{st.st_size}".encode()).hexdigest()
+    except OSError:
+        return None
+
+
+def scan_root_to_db(
+    conn: sqlite3.Connection,
+    root_path: str | Path,
+    scan_presets: bool = True,
+) -> dict[str, Any]:
+    """Scan a folder and upsert all audio/preset files into the samples table.
+
+    Reuses :func:`librarian.index._scan_folder` to build records (name, path,
+    ext, size, category, folder, root, tags, strings), adds a ``file_hash``,
+    and persists each via :func:`upsert_sample`.  Audio analysis (librosa)
+    is **not** performed here — that is a separate step
+    (``batch_analyze_sqlite.py`` / ``librarian_analyze``).
+
+    Updates the ``roots`` and ``scan_history`` tables.
+
+    Parameters
+    ----------
+    root_path:
+        Folder to scan recursively.
+    scan_presets:
+        Include preset files (.nmsv, .nksf, etc.).
+
+    Returns
+    -------
+    dict
+        ``{"files_found": int, "files_new": int, "files_updated": int,
+        "root": str}``.
+    """
+    # Late import to avoid any circular dependency with librarian.index.
+    from .index import _scan_folder
+
+    root = Path(root_path)
+    if not root.exists():
+        return {"files_found": 0, "files_new": 0, "files_updated": 0,
+                "root": str(root)}
+
+    # Snapshot existing paths so we can count new vs updated.
+    existing = {
+        row[0] for row in conn.execute("SELECT path FROM samples").fetchall()
+    }
+
+    files_new = 0
+    files_updated = 0
+    found = 0
+    for record in _scan_folder(root, scan_presets=scan_presets):
+        found += 1
+        record["file_hash"] = compute_file_hash(record["path"])
+        upsert_sample(conn, record)
+        if record["path"] in existing:
+            files_updated += 1
+        else:
+            files_new += 1
+
+    record_scan(conn, str(root), found, files_new, files_updated)
+    update_root(conn, str(root), found)
+
+    return {"files_found": found, "files_new": files_new,
+            "files_updated": files_updated, "root": str(root)}
+
+
 # ---------------------------------------------------------------------------
 # Public API — stats
 # ---------------------------------------------------------------------------
