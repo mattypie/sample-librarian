@@ -64,6 +64,14 @@ def get_summary_path() -> str:
     return _DEFAULT_SUMMARY
 
 
+def get_db_path() -> str:
+    """SQLite database path (default: data/samples.db)."""
+    return os.environ.get(
+        "SAMPLE_LIBRARIAN_DB",
+        str(_BASE_DIR / "data" / "samples.db"),
+    )
+
+
 def get_liveagent_host() -> str:
     if _local and hasattr(_local, "LIVEAGENT_HOST"):
         return _local.LIVEAGENT_HOST

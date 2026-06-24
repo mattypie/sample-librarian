@@ -500,6 +500,40 @@ def upsert_analysis(conn: sqlite3.Connection, sample_id: int, analysis: dict[str
 # Public API — queries
 # ---------------------------------------------------------------------------
 
+def _run_fts(
+    conn: sqlite3.Connection,
+    fts_query: str,
+    category: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Run a single FTS5 MATCH query and return sample dicts.
+
+    *fts_query* is passed verbatim to FTS5.  *category* is applied as a
+    case-insensitive filter when given.
+    """
+    sql = """
+        SELECT s.*, bm25(samples_fts) AS rank
+        FROM samples_fts
+        JOIN samples s ON s.id = samples_fts.rowid
+        WHERE samples_fts MATCH ?
+    """
+    params: list[Any] = [fts_query]
+    if category:
+        sql += " AND lower(s.category) = lower(?)"
+        params.append(category)
+    sql += " ORDER BY rank ASC LIMIT ?"
+    params.append(limit)
+
+    rows = conn.execute(sql, params).fetchall()
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        d = dict(row)
+        sid = d["id"]
+        d["tags"] = get_sample_tags(conn, sid)
+        results.append(d)
+    return results
+
+
 def search_samples(
     conn: sqlite3.Connection,
     query: str,
@@ -508,13 +542,18 @@ def search_samples(
 ) -> list[dict[str, Any]]:
     """Full-text search across sample name, category, folder, and tags.
 
-    Multi-word queries are AND-combined by FTS5 by default and results are
-    ranked by BM25 (lower rank value = better match).
+    Search runs in two stages:
+
+    1. **AND** — all tokens must match (precise).  Each token is quoted so
+       FTS5 combines them with implicit AND.
+    2. **OR fallback** — if the AND stage returns nothing, tokens are joined
+       with ``OR`` so samples matching *any* token are returned, ranked by
+       BM25 (samples containing more query tokens rank higher).
 
     Parameters
     ----------
     query:
-        Raw search string.  Tokens are passed to FTS5 with implicit AND.
+        Raw search string.
     category:
         If given, results are filtered to this category (case-insensitive).
     limit:
@@ -529,38 +568,24 @@ def search_samples(
     if not query or not query.strip():
         return []
 
-    # Build an FTS5 query: quote each whitespace-delimited token so that
-    # punctuation / special characters don't break the parser.  Multiple tokens
-    # are implicitly AND-joined.
     tokens = [t.strip() for t in query.split() if t.strip()]
     if not tokens:
         return []
-    # Escape double-quotes inside tokens, then wrap each in double quotes.
-    fts_query = " ".join('"' + t.replace('"', '""') + '"' for t in tokens)
 
-    sql = """
-        SELECT s.*, bm25(samples_fts) AS rank
-        FROM samples_fts
-        JOIN samples s ON s.id = samples_fts.rowid
-        WHERE samples_fts MATCH ?
-    """
-    params: list[Any] = [fts_query]
+    def _quote(tok: str) -> str:
+        return '"' + tok.replace('"', '""') + '"'
 
-    if category:
-        sql += " AND lower(s.category) = lower(?)"
-        params.append(category)
+    # Stage 1: AND (precise)
+    fts_and = " ".join(_quote(t) for t in tokens)
+    results = _run_fts(conn, fts_and, category, limit)
+    if results:
+        return results
 
-    sql += " ORDER BY rank ASC LIMIT ?"
-    params.append(limit)
-
-    rows = conn.execute(sql, params).fetchall()
-    results: list[dict[str, Any]] = []
-    for row in rows:
-        d = dict(row)
-        sid = d["id"]
-        d["tags"] = get_sample_tags(conn, sid)
-        results.append(d)
-    return results
+    # Stage 2: OR fallback (relaxed)
+    if len(tokens) == 1:
+        return []  # OR on a single token is identical to AND; skip redundant query
+    fts_or = " OR ".join(_quote(t) for t in tokens)
+    return _run_fts(conn, fts_or, category, limit)
 
 
 def get_sample_by_path(conn: sqlite3.Connection, path: str) -> dict[str, Any] | None:
@@ -632,6 +657,182 @@ def update_root(conn: sqlite3.Connection, root_path: str, file_count: int) -> No
         (root_path, now, file_count),
     )
     conn.commit()
+
+
+def compute_file_hash(path: str) -> str | None:
+    """Quick hash of file path + size for dedup.
+
+    Shared by :func:`scan_root_to_db` and ``batch_analyze_sqlite.py`` so the
+    dedup scheme stays consistent across ingestion paths.
+    """
+    import hashlib
+
+    try:
+        st = os.stat(path)
+        return hashlib.md5(f"{path}:{st.st_size}".encode()).hexdigest()
+    except OSError:
+        return None
+
+
+def scan_root_to_db(
+    conn: sqlite3.Connection,
+    root_path: str | Path,
+    scan_presets: bool = True,
+) -> dict[str, Any]:
+    """Scan a folder and upsert all audio/preset files into the samples table.
+
+    Reuses :func:`librarian.index._scan_folder` to build records (name, path,
+    ext, size, category, folder, root, tags, strings), adds a ``file_hash``,
+    and persists each via :func:`upsert_sample`.  Audio analysis (librosa)
+    is **not** performed here — that is a separate step
+    (``batch_analyze_sqlite.py`` / ``librarian_analyze``).
+
+    Updates the ``roots`` and ``scan_history`` tables.
+
+    Parameters
+    ----------
+    root_path:
+        Folder to scan recursively.
+    scan_presets:
+        Include preset files (.nmsv, .nksf, etc.).
+
+    Returns
+    -------
+    dict
+        ``{"files_found": int, "files_new": int, "files_updated": int,
+        "root": str}``.
+    """
+    # Late import to avoid any circular dependency with librarian.index.
+    from .index import _scan_folder
+
+    root = Path(root_path)
+    if not root.exists():
+        return {"files_found": 0, "files_new": 0, "files_updated": 0,
+                "root": str(root)}
+
+    # Snapshot existing paths so we can count new vs updated.
+    existing = {
+        row[0] for row in conn.execute("SELECT path FROM samples").fetchall()
+    }
+
+    files_new = 0
+    files_updated = 0
+    found = 0
+    for record in _scan_folder(root, scan_presets=scan_presets):
+        found += 1
+        record["file_hash"] = compute_file_hash(record["path"])
+        upsert_sample(conn, record)
+        if record["path"] in existing:
+            files_updated += 1
+        else:
+            files_new += 1
+
+    record_scan(conn, str(root), found, files_new, files_updated)
+    update_root(conn, str(root), found)
+
+    return {"files_found": found, "files_new": files_new,
+            "files_updated": files_updated, "root": str(root)}
+
+
+def recommend_samples_db(
+    conn: sqlite3.Connection,
+    target_key: str,
+    terms: list[str] | None = None,
+    category: str | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Recommend samples harmonically compatible with *target_key*.
+
+    Uses Camelot Wheel matching via :func:`librarian.analyze.get_compatible_keys`
+    against keys stored in ``analysis_cache``.  No real-time analysis is
+    performed — only previously-analysed samples are considered.
+
+    Selection rules:
+
+    * Samples with ``is_atonal = 1`` (hi-hats, noise, FX) are **always**
+      included — they have no key constraint.
+    * Tonal samples are included only if their ``key`` is in the compatible
+      set for *target_key*.
+    * Samples without analysis data (no ``analysis_cache`` row) are excluded.
+
+    *terms* and *category* narrow the candidate pool via FTS5 search before
+    key filtering.
+
+    Parameters
+    ----------
+    target_key:
+        Target key, e.g. ``"Fm"``, ``"C"``, ``"Am"``.
+    terms:
+        Optional search terms to filter candidates.
+    category:
+        Optional category filter.
+    limit:
+        Maximum results.
+
+    Returns
+    -------
+    list[dict]
+        Enriched sample dicts (via :func:`enrich_result`), preserving
+        candidate order.
+    """
+    from .analyze import get_compatible_keys
+
+    compatible_keys = set(get_compatible_keys(target_key))
+
+    # Gather candidates via FTS5 if terms given, else scan broadly.
+    query = " ".join(terms) if terms else ""
+    if query:
+        candidates = search_samples(conn, query, category=category, limit=limit * 5)
+    else:
+        # No terms: fetch recent samples, optionally filtered by category.
+        if category:
+            rows = conn.execute(
+                "SELECT * FROM samples WHERE lower(category) = lower(?) "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (category, limit * 5),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM samples ORDER BY updated_at DESC LIMIT ?",
+                (limit * 5,),
+            ).fetchall()
+        candidates = []
+        for row in rows:
+            d = dict(row)
+            d["tags"] = get_sample_tags(conn, d["id"])
+            candidates.append(d)
+
+    if not candidates:
+        return []
+
+    # Batch-fetch analysis for candidates.
+    sample_ids = [c["id"] for c in candidates if "id" in c]
+    analysis_map: dict[int, dict] = {}
+    if sample_ids:
+        placeholders = ",".join("?" * len(sample_ids))
+        rows = conn.execute(
+            f"SELECT * FROM analysis_cache WHERE sample_id IN ({placeholders})",
+            sample_ids,
+        ).fetchall()
+        for row in rows:
+            d = dict(row)
+            analysis_map[d["sample_id"]] = d
+
+    compatible: list[dict[str, Any]] = []
+    for c in candidates:
+        sid = c.get("id")
+        analysis = analysis_map.get(sid) if sid else None
+        if analysis is None:
+            continue  # no analysis → cannot determine key → skip
+        is_atonal = bool(analysis.get("is_atonal", 0))
+        if is_atonal:
+            compatible.append(enrich_result(c, analysis))
+            continue
+        key_val = analysis.get("key")
+        if key_val and key_val in compatible_keys:
+            compatible.append(enrich_result(c, analysis))
+
+    return compatible[:limit]
 
 
 # ---------------------------------------------------------------------------

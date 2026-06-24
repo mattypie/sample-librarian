@@ -34,9 +34,13 @@ except ImportError:
     HAS_MCP = False
 
 from librarian.analyze import analyze_file, analyze_folder, get_compatible_keys
-from librarian.index import IndexConfig, build_index
-from librarian.recommend import recommend_samples
-from librarian.search import search_index
+from librarian.db import (
+    get_db,
+    get_stats,
+    recommend_samples_db,
+    scan_root_to_db,
+    search_samples_enriched,
+)
 
 # Check LiveAgent availability lazily
 _LIVEAGENT_CHECKED = False
@@ -56,13 +60,24 @@ def _check_liveagent() -> bool:
     return _LIVEAGENT_AVAILABLE
 
 
-def _get_index_path() -> str:
-    """Get the index path from config or default."""
+def _get_db_path() -> str:
+    """Get the SQLite database path from config or default."""
     try:
-        from librarian.config import get_index_path
-        return get_index_path()
+        from config import get_db_path
+        return get_db_path()
     except Exception:
-        return str(Path(__file__).parent / "data" / "samples_index.jsonl")
+        return str(Path(__file__).parent / "data" / "samples.db")
+
+
+def _get_db():
+    """Open a DB connection for a single tool call. Caller must close().
+
+    Ensures the schema exists (idempotent) so tools work on a fresh DB.
+    """
+    from librarian.db import init_db
+    db_path = _get_db_path()
+    init_db(db_path)
+    return get_db(db_path)
 
 
 if not HAS_MCP:
@@ -92,12 +107,19 @@ def librarian_search(
     Returns:
         JSON array of matching samples with name, path, category, tags.
     """
-    results = search_index(
-        _get_index_path(), terms,
-        limit=limit,
-        category=category or None,
-        ext=ext or None,
-    )
+    query = " ".join(terms) if terms else ""
+    conn = _get_db()
+    try:
+        results = search_samples_enriched(
+            conn, query,
+            category=category or None,
+            limit=limit,
+        )
+        if ext:
+            results = [r for r in results if r.get("ext", "").lstrip(".").lower()
+                       == ext.lstrip(".").lower()]
+    finally:
+        conn.close()
     return json.dumps(results, ensure_ascii=False)
 
 
@@ -115,12 +137,25 @@ def librarian_index(
     Returns:
         JSON summary with total files, categories, sizes.
     """
-    config = IndexConfig(
-        roots=roots,
-        output=_get_index_path(),
-        scan_presets=scan_presets,
-    )
-    count, summary = build_index(config)
+    conn = _get_db()
+    try:
+        summaries = []
+        total_new = 0
+        for root in roots:
+            r = scan_root_to_db(conn, root, scan_presets=scan_presets)
+            summaries.append(r)
+            total_new += r["files_new"]
+
+        stats = get_stats(conn)
+        summary = {
+            "total_files": stats["total_samples"],
+            "total_new": total_new,
+            "roots_scanned": summaries,
+            "categories": stats["by_category"],
+            "analyzed_count": stats["analyzed_count"],
+        }
+    finally:
+        conn.close()
     return json.dumps(summary, ensure_ascii=False)
 
 
@@ -141,7 +176,6 @@ def librarian_add_root(
     Returns:
         JSON with updated roots list and index summary (if rebuilt).
     """
-    import os
     base_dir = Path(__file__).parent
     local_path = base_dir / "config.local.py"
 
@@ -210,13 +244,20 @@ def librarian_add_root(
     # Re-index if requested
     if rebuild_index:
         all_roots = current_roots + [clean_path]
-        config = IndexConfig(
-            roots=all_roots,
-            output=_get_index_path(),
-            scan_presets=True,
-        )
-        count, summary = build_index(config)
-        result["index_summary"] = summary
+        conn = _get_db()
+        try:
+            scan_results = []
+            for r in all_roots:
+                scan_results.append(scan_root_to_db(conn, r, scan_presets=True))
+            stats = get_stats(conn)
+        finally:
+            conn.close()
+
+        result["index_summary"] = {
+            "total_files": stats["total_samples"],
+            "roots_scanned": scan_results,
+            "categories": stats["by_category"],
+        }
         result["total_roots"] = len(all_roots)
 
     return json.dumps(result, ensure_ascii=False)
@@ -228,29 +269,13 @@ def librarian_list_roots() -> str:
 
     Returns:
         JSON with:
-        - roots: list of configured folder paths
-        - index_exists: whether index file is present
-        - index_size: number of indexed files (if available)
-        - index_modified: last build timestamp
+        - roots: list of configured folder paths with on-disk status
+        - index: DB summary (total samples, analyzed count, last scan)
     """
-    import time
-
     from config import get_samples_roots
     roots = get_samples_roots()
 
-    index_path = _get_index_path()
-    index_exists = os.path.isfile(index_path)
-    index_size = 0
-    index_mtime = None
-
-    if index_exists:
-        # Count lines in JSONL
-        with open(index_path, encoding="utf-8") as f:
-            index_size = sum(1 for _ in f)
-        mtime = os.path.getmtime(index_path)
-        index_mtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime))
-
-    # Also show which roots actually exist on disk
+    # On-disk status per root
     root_status = []
     for r in roots:
         expanded = os.path.expanduser(r)
@@ -267,12 +292,27 @@ def librarian_list_roots() -> str:
             "audio_files": file_count,
         })
 
+    # DB stats instead of JSONL line count
+    conn = _get_db()
+    try:
+        stats = get_stats(conn)
+        # Last scan timestamp from scan_history
+        last_scan_row = conn.execute(
+            "SELECT completed_at FROM scan_history "
+            "ORDER BY completed_at DESC LIMIT 1"
+        ).fetchone()
+        last_scan = last_scan_row[0] if last_scan_row else None
+    finally:
+        conn.close()
+
     return json.dumps({
         "roots": root_status,
         "index": {
-            "exists": index_exists,
-            "indexed_files": index_size,
-            "last_built": index_mtime,
+            "exists": stats["total_samples"] > 0,
+            "indexed_files": stats["total_samples"],
+            "analyzed_count": stats["analyzed_count"],
+            "last_built": last_scan,
+            "by_category": stats["by_category"],
         },
     }, ensure_ascii=False)
 
@@ -332,19 +372,22 @@ def librarian_recommend(
         terms: Optional search terms to filter
         category: Filter by category
         limit: Max results
-        analyze: Run live pitch analysis for precise matching
+        analyze: Reserved (analysis comes from cache, not real-time)
 
     Returns:
         JSON array of recommended samples.
     """
-    results = recommend_samples(
-        _get_index_path(),
-        target_key=target_key,
-        terms=terms,
-        category=category or None,
-        limit=limit,
-        analyze=analyze,
-    )
+    conn = _get_db()
+    try:
+        results = recommend_samples_db(
+            conn,
+            target_key=target_key,
+            terms=terms,
+            category=category or None,
+            limit=limit,
+        )
+    finally:
+        conn.close()
     compatible = get_compatible_keys(target_key)
     output = {
         "target_key": target_key,

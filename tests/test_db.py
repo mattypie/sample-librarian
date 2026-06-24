@@ -137,6 +137,24 @@ def test_fts5_search_multiword(db_conn, sample_factory):
     assert not any("Snare" in n for n in names)
 
 
+def test_fts5_search_or_fallback(db_conn, sample_factory):
+    """AND検索で0件の時、OR検索にフォールバックして結果を返す。"""
+    sample_factory(
+        db_conn, name="808 Kick", category="Kick",
+        path="/s/or1.wav", tags=["punchy"],
+    )
+    sample_factory(
+        db_conn, name="Punchy Snare", category="Snare",
+        path="/s/or2.wav",
+    )
+
+    # "808 snare" — 両方の単語を含むサンプルはないが、
+    # ORフォールバックで各サンプルが1語ずつマッチするはず（両方返る）
+    results = search_samples(db_conn, "808 snare")
+    names = [r["name"] for r in results]
+    assert "808 Kick" in names and "Punchy Snare" in names
+
+
 # ---------------------------------------------------------------------------
 # Category filter
 # ---------------------------------------------------------------------------
@@ -395,3 +413,195 @@ def test_migrate_from_jsonl_missing_file(db_conn, tmp_path: Path):
     """migrate_from_jsonl returns 0 for a non-existent file."""
     count = migrate_from_jsonl(db_conn, str(tmp_path / "nonexistent.jsonl"))
     assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# scan_root_to_db
+# ---------------------------------------------------------------------------
+
+def test_scan_root_to_db(tmp_path: Path):
+    """scan_root_to_db scans a folder and upserts samples into the DB."""
+    from librarian.db import get_db, get_stats, init_db, scan_root_to_db, search_samples
+
+    # Create a fake sample folder
+    root = tmp_path / "samples"
+    root.mkdir()
+    (root / "Kick").mkdir()
+    (root / "Kick" / "808 Boom.wav").write_bytes(b"\x00" * 1024)
+    (root / "Kick" / "Punchy Kick.wav").write_bytes(b"\x00" * 2048)
+    (root / "Snare").mkdir()
+    (root / "Snare" / "Clap.wav").write_bytes(b"\x00" * 512)
+
+    db_path = str(tmp_path / "scan_test.db")
+    init_db(db_path)
+    conn = get_db(db_path)
+    try:
+        result = scan_root_to_db(conn, root)
+
+        # All 3 audio files found
+        assert result["files_found"] == 3
+        assert result["files_new"] == 3
+        assert result["root"] == str(root)
+
+        # Samples are in the DB and searchable
+        stats = get_stats(conn)
+        assert stats["total_samples"] == 3
+
+        hits = search_samples(conn, "boom")
+        assert len(hits) == 1
+        assert "808 Boom" in hits[0]["name"]
+
+        # Re-scan: all updates (no new)
+        result2 = scan_root_to_db(conn, root)
+        assert result2["files_found"] == 3
+        assert result2["files_new"] == 0
+        assert result2["files_updated"] == 3
+    finally:
+        conn.close()
+
+
+def test_scan_root_to_db_missing_root(tmp_path: Path):
+    """scan_root_to_db returns zeros for a non-existent root."""
+    from librarian.db import get_db, init_db, scan_root_to_db
+
+    db_path = str(tmp_path / "missing_test.db")
+    init_db(db_path)
+    conn = get_db(db_path)
+    try:
+        result = scan_root_to_db(conn, tmp_path / "does_not_exist")
+        assert result["files_found"] == 0
+        assert result["files_new"] == 0
+        assert result["files_updated"] == 0
+    finally:
+        conn.close()
+
+
+def test_scan_root_to_db_empty_folder(tmp_path: Path):
+    """scan_root_to_db on an empty folder finds nothing but still records a scan."""
+    from librarian.db import get_db, get_stats, init_db, scan_root_to_db
+
+    root = tmp_path / "empty"
+    root.mkdir()
+
+    db_path = str(tmp_path / "empty_test.db")
+    init_db(db_path)
+    conn = get_db(db_path)
+    try:
+        result = scan_root_to_db(conn, root)
+        assert result["files_found"] == 0
+
+        stats = get_stats(conn)
+        assert stats["total_samples"] == 0
+
+        # scan_history should still record the (empty) scan
+        history = conn.execute(
+            "SELECT files_found, status FROM scan_history WHERE root_path = ?",
+            (str(root),),
+        ).fetchone()
+        assert history is not None
+        assert history["files_found"] == 0
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# recommend_samples_db
+# ---------------------------------------------------------------------------
+
+def test_recommend_samples_db(db_conn, sample_factory):
+    """recommend_samples_db returns harmonically compatible samples."""
+    from librarian.db import recommend_samples_db, upsert_analysis
+
+    # target_key "Fm" → compatible: ["Ab", "Fm", "A#m", "Cm"]
+    # DB stores major-form keys; "Ab" is the major-form key in Fm's set.
+
+    # Compatible: key "Ab" (in Fm's compatible set)
+    sid_compatible = sample_factory(
+        db_conn, name="Ab Bass", category="Bass", path="/r/bass_ab.wav",
+    )
+    upsert_analysis(db_conn, sid_compatible, {
+        "key": "Ab", "pitch": "Ab", "note_number": 44,
+        "is_atonal": False, "sample_type": "loop",
+    })
+
+    # Incompatible: key "E" (NOT in Fm's compatible set)
+    sid_incompatible = sample_factory(
+        db_conn, name="E Bass", category="Bass", path="/r/bass_e.wav",
+    )
+    upsert_analysis(db_conn, sid_incompatible, {
+        "key": "E", "pitch": "E", "note_number": 40,
+        "is_atonal": False, "sample_type": "loop",
+    })
+
+    # Atonal: always included regardless of key
+    sid_atonal = sample_factory(
+        db_conn, name="Closed Hat", category="HiHat", path="/r/hat.wav",
+    )
+    upsert_analysis(db_conn, sid_atonal, {
+        "is_atonal": True, "sample_type": "oneshot",
+    })
+
+    results = recommend_samples_db(
+        db_conn, target_key="Fm", terms=["bass", "hat"], limit=20,
+    )
+    names = [r["name"] for r in results]
+
+    # Compatible bass included, incompatible bass excluded, atonal hat included
+    assert "Ab Bass" in names
+    assert "E Bass" not in names
+    assert "Closed Hat" in names
+
+
+def test_recommend_samples_db_no_terms(db_conn, sample_factory):
+    """recommend_samples_db with no terms falls back to recent samples."""
+    from librarian.db import recommend_samples_db, upsert_analysis
+
+    # Compatible + category filter (no terms)
+    sid = sample_factory(
+        db_conn, name="Ab Bass", category="Bass", path="/r2/bass_ab.wav",
+    )
+    upsert_analysis(db_conn, sid, {
+        "key": "Ab", "is_atonal": False, "sample_type": "loop",
+    })
+    # Incompatible, same category
+    sid2 = sample_factory(
+        db_conn, name="E Bass", category="Bass", path="/r2/bass_e.wav",
+    )
+    upsert_analysis(db_conn, sid2, {
+        "key": "E", "is_atonal": False, "sample_type": "loop",
+    })
+
+    # No terms, category=Bass → should still filter by key compatibility
+    results = recommend_samples_db(
+        db_conn, target_key="Fm", terms=None, category="Bass", limit=20,
+    )
+    names = [r["name"] for r in results]
+    assert "Ab Bass" in names
+    assert "E Bass" not in names
+
+
+def test_recommend_samples_db_no_analysis(db_conn, sample_factory):
+    """Samples without analysis data are excluded from recommendations."""
+    from librarian.db import recommend_samples_db
+
+    # Sample with no analysis_cache row
+    sample_factory(
+        db_conn, name="Unknown Bass", category="Bass", path="/r3/bass.wav",
+    )
+
+    results = recommend_samples_db(
+        db_conn, target_key="Fm", terms=["bass"], limit=20,
+    )
+    names = [r["name"] for r in results]
+    assert "Unknown Bass" not in names
+    assert results == []
+
+
+def test_recommend_samples_db_no_candidates(db_conn, sample_factory):
+    """No matching candidates returns an empty list."""
+    from librarian.db import recommend_samples_db
+
+    results = recommend_samples_db(
+        db_conn, target_key="Fm", terms=["nonexistent_term_xyz"], limit=20,
+    )
+    assert results == []

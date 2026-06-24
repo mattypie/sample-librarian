@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Batch scan + analyze Battery 4 + Maschine 2 Factory directly into SQLite."""
 
-import hashlib
 import os
 import sys
 import time
@@ -9,7 +8,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from librarian.analyze import analyze_file
-from librarian.db import get_db, init_db, upsert_analysis, upsert_sample
+from librarian.db import compute_file_hash, get_db, init_db, upsert_analysis, upsert_sample
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "samples.db")
 
@@ -35,15 +34,6 @@ def collect_files():
                     count += 1
         print(f"  {os.path.basename(lib)}: {count} files", flush=True)
     return files
-
-
-def file_hash(path):
-    """Quick hash of file path + size for dedup."""
-    try:
-        st = os.stat(path)
-        return hashlib.md5(f"{path}:{st.st_size}".encode()).hexdigest()
-    except OSError:
-        return None
 
 
 def derive_category(path):
@@ -123,7 +113,7 @@ def run():
                     "category": category,
                     "folder": folder,
                     "root": "SubSSD",
-                    "file_hash": file_hash(fp),
+                    "file_hash": compute_file_hash(fp),
                     "strings": [],
                     "tags": [],
                 }
