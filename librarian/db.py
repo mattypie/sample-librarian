@@ -660,7 +660,15 @@ def update_root(conn: sqlite3.Connection, root_path: str, file_count: int) -> No
 
 
 def compute_file_hash(path: str) -> str | None:
-    """Quick hash of file path + size for dedup.
+    """Content-based hash for dedup (size + mtime), shared across ingestion paths.
+
+    Intentionally does **not** include the file path: two byte-identical
+    files at different paths must produce the same hash so
+    :func:`find_duplicates_by_hash` can detect them. Uses size + mtime as a
+    fast content signal rather than reading the full file bytes (which would
+    be costly for large libraries). This is a weak signal — files that
+    happen to share size and mtime but differ in content will collide — but
+    it is adequate for surfacing duplicate candidates for review.
 
     Shared by :func:`scan_root_to_db` and ``batch_analyze_sqlite.py`` so the
     dedup scheme stays consistent across ingestion paths.
@@ -669,7 +677,7 @@ def compute_file_hash(path: str) -> str | None:
 
     try:
         st = os.stat(path)
-        return hashlib.md5(f"{path}:{st.st_size}".encode()).hexdigest()
+        return hashlib.md5(f"{st.st_size}:{int(st.st_mtime)}".encode()).hexdigest()
     except OSError:
         return None
 

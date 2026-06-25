@@ -325,6 +325,34 @@ def test_find_duplicates_by_hash(db_conn, sample_factory):
     assert groups[0]["count"] == 2
 
 
+def test_compute_file_hash_path_independent(tmp_path: Path):
+    """compute_file_hash must NOT mix the file path into the hash.
+
+    Two byte-identical files at different paths must produce the same hash
+    so that find_duplicates_by_hash can detect them. (Bug I1: previously
+    the path was part of the MD5 input, making dedup impossible.)
+    """
+    from librarian.db import compute_file_hash
+
+    # Two identical files at different paths (same content, size, mtime)
+    data = b"\x01\x02\x03\x04" * 1000
+    f1 = tmp_path / "kick_original.wav"
+    f2 = tmp_path / "copy" / "kick_copy.wav"
+    (tmp_path / "copy").mkdir()
+    f1.write_bytes(data)
+    f2.write_bytes(data)
+    # Equalize mtime so the content+size+mtime signal is identical
+    import os
+    os.utime(f1, (1000, 1000))
+    os.utime(f2, (1000, 1000))
+
+    h1 = compute_file_hash(str(f1))
+    h2 = compute_file_hash(str(f2))
+    assert h1 is not None
+    assert h2 is not None
+    assert h1 == h2, "path-independent hash should match for identical files"
+
+
 def test_find_similar_by_duration(db_conn, sample_factory):
     """Samples with near-identical durations in the same category group together."""
     sid1 = sample_factory(
