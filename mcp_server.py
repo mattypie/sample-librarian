@@ -69,14 +69,23 @@ def _get_db_path() -> str:
         return str(Path(__file__).parent / "data" / "samples.db")
 
 
+# Schema initialization runs once at startup, not on every tool call.
+# Running init_db per-call caused redundant DDL under concurrent requests
+# and risked "database is locked" on parallel tool invocations.
+_db_initialized = False
+
+
 def _get_db():
     """Open a DB connection for a single tool call. Caller must close().
 
-    Ensures the schema exists (idempotent) so tools work on a fresh DB.
+    Ensures the schema exists on first call only (idempotent thereafter).
     """
-    from librarian.db import init_db
+    global _db_initialized
     db_path = _get_db_path()
-    init_db(db_path)
+    if not _db_initialized:
+        from librarian.db import init_db
+        init_db(db_path)
+        _db_initialized = True
     return get_db(db_path)
 
 
